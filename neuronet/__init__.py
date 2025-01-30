@@ -1,4 +1,4 @@
-# Expose user to hrc library
+# Expose user to NeuroNet library
 from .neuronet import neuronet
 from .pipeline import wrangler
 from .observer import lens
