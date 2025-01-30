@@ -4,7 +4,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from glob import glob
 
-class NeuroNet:
+class neuronet:
 	
 	def __init__(self, network_folder = None):
 
@@ -211,9 +211,9 @@ class NeuroNet:
 			print(f"Model weights reinitialized")
 
 		# Create a callback to the saved weights for saving model while training
-		self.callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath=self.checkpoint_path + '',
-											save_weights_only=True,
-											verbose=1)]
+		self.callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath = self.checkpoint_path + '',
+											save_weights_only = True,
+											verbose = 1)]
 
 	def calc_conv(self, shape):
 		return [(input_length - filter_length + (2*pad))//stride + 1 for input_length, filter_length, stride, pad in zip(shape, self.config.kernel_size, self.config.kernel_stride, self.config.padding)]

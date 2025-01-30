@@ -184,3 +184,4 @@ check_shape.py
 abcd_downloader.sh
 *bsub.sh
 __pycache__/
+bsub/*
