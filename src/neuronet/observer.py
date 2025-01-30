@@ -4,7 +4,6 @@ import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
 import nibabel as nib
-import nibabel as nib
 from glob import glob
 from numpy import asarray
 from nilearn import plotting, datasets, surface

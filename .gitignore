@@ -177,7 +177,7 @@ main.py
 pre_neuronet_bsub.sh
 neuronet_bsub.sh
 logs/*
-neuronet/*
+models/*
 check_shape.py
 .netrc
 .nda_creds

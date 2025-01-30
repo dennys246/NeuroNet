@@ -11,7 +11,7 @@ config = {
     "bids_directory": None,
     "bold_identifier": None,
 	"label_identifier":None,
-    "project_directory": "neuronet/",
+    "project_directory": "models/",
     "model_directory": "run_1",
     "checkpoint_path": None,
     "tool": "fmriprep",
