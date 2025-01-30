@@ -169,3 +169,18 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# NeuroNet
+._*
+__py*/
+main.py
+pre_neuronet_bsub.sh
+neuronet_bsub.sh
+logs/*
+neuronet/*
+check_shape.py
+.netrc
+.nda_creds
+abcd_downloader.sh
+*bsub.sh
+__pycache__/
