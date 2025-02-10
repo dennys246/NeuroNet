@@ -1,8 +1,10 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
-import os, atexit, pipeline, observer, config, psutil
+import os, atexit, psutil, wandb
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from glob import glob
+
+import pipeline, observer, config
 
 class neuronet:
 	
@@ -210,10 +212,48 @@ class neuronet:
 				self.config.model_history[f"val_{history_type}"] = [] 
 			print(f"Model weights reinitialized")
 
+		# Set up Weights and Bias logging
+		wandb.init(
+			# set the wandb project where this run will be logged
+			project = self.config.architecture,
+
+			# track hyperparameters and run metadata with wandb.config
+			config = {
+				"accuracy": self.config.history_types,
+				"loss": self.config.loss,
+				"val_accuracy": self.config.history_types,
+				"val_loss": self.config.loss,
+				"convolution_depth": self.config.convolution_depth,
+				"init_filter_count": self.config.init_filter_count,
+				"kernel_initializer": self.config.kernel_initializer,
+				"kernel_size": self.config.kernel_size,
+				"kernel_stride": self.config.kernel_stride,
+				"optimizer": self.config.optimizer,
+				"epoch": self.config.epochs,
+				"batch_size": self.config.batch_size,
+				"learning_rate": self.config.learning_rate,
+				"dropout": self.config.dropout,
+				"epsilon": self.config.epsilon,
+				"bias": self.config.bias,
+				"momentum": self.config.momentum,
+				"negative_slope": self.config.negative_slope,
+				"top_density": self.config.top_density,
+				"density_dropout": self.config.density_dropout,
+				"dataset": self.config.dataset,
+				"tool": self.config.tool,
+				"multiscale_pooling": self.config.multiscale_pooling,
+				"use_nestrov": self.config.use_nestrov,
+    			"use_amsgrad": self.config.use_amsgrad
+			},
+
+			tags = ["NeuroNet", self.config.model_directory, "CNN"]
+		)
+
 		# Create a callback to the saved weights for saving model while training
 		self.callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath = self.checkpoint_path + '',
 											save_weights_only = True,
-											verbose = 1)]
+											verbose = 1),
+						wandb.keras.WandbCallback()]
 
 	def calc_conv(self, shape):
 		return [(input_length - filter_length + (2*pad))//stride + 1 for input_length, filter_length, stride, pad in zip(shape, self.config.kernel_size, self.config.kernel_stride, self.config.padding)]
@@ -294,6 +334,7 @@ class neuronet:
 		if self.model != None:
 			self.model.save_weights(self.checkpoint_path) # Save model
 			self.config.save_config()
+			wandb.finish()
 	
 	def load_model(self):
 		if os.path.exists(self.checkpoint_path):
@@ -333,10 +374,14 @@ class SpatialAttention(tf.keras.layers.Layer):
 	def __init__(self, kernel_size=7, **kwargs):
 		super(SpatialAttention, self).__init__(**kwargs)
 		self.kernel_size = kernel_size
-		
-	def build(self, input_shape):
+
 		self.concat = tf.keras.layers.Concatenate(axis=-1)
 		self.multiply = tf.keras.layers.Multiply()
+
+		self.conv = None
+		
+	def build(self, input_shape):
+		
 		
 		self.conv = tf.keras.layers.Conv3D(
 			filters=1, 
