@@ -1,7 +1,7 @@
 import json, atexit
 from glob import glob
 
-config = {
+config_template = {
     "dataset": "Study",
     "architecture": "NeuroNet",
     "data_shape": None,
@@ -48,7 +48,8 @@ config = {
     "use_nestrov": True,
     "use_amsgrad": True,
     "loss": "mse",
-    "rebuild": False
+    "rebuild": False,
+    "use_wandb": False
 }
 
 class build:
@@ -71,7 +72,7 @@ class build:
                 config_file = config_files[0]
             config_json = self.load_config(config_file)
         
-        config_json = config_json or config # Use passed in config or default config
+        config_json = config_json or config_template # Use passed in config or default config
 
         self.configure(**config_json) # Build configuration
 
@@ -91,7 +92,7 @@ class build:
             config_json = json.load(config_file)
         return config_json
 
-    def configure(self, dataset, architecture, data_shape, subject_pool, previously_run, excluded_subjects, bids_directory, bold_identifier, label_identifier, project_directory, model_directory, checkpoint_path, model_history, tool, shuffle, epochs, batch_size, negative_slope, epsilon, learning_rate, bias, dropout, momentum, kernel_initializer, convolution_depth, init_filter_count, kernel_size, kernel_stride, zero_padding, padding, pool_size, pool_stride, multiscale_pooling, top_density, density_dropout, output_activation, outputs, outputs_category, output_descriptor, output_unit, history_types, optimizers, optimizer, use_nestrov, use_amsgrad, loss, rebuild):
+    def configure(self, dataset, architecture, data_shape, subject_pool, previously_run, excluded_subjects, bids_directory, bold_identifier, label_identifier, project_directory, model_directory, checkpoint_path, model_history, tool, shuffle, epochs, batch_size, negative_slope, epsilon, learning_rate, bias, dropout, momentum, kernel_initializer, convolution_depth, init_filter_count, kernel_size, kernel_stride, zero_padding, padding, pool_size, pool_stride, multiscale_pooling, top_density, density_dropout, output_activation, outputs, outputs_category, output_descriptor, output_unit, history_types, optimizers, optimizer, use_nestrov, use_amsgrad, loss, rebuild, use_wandb):
 		#-------------------------------- Model Set-Up -------------------------------#
 		#These initial variables are used by NeuroNet and won't need to be set to anything
         self.dataset = dataset
@@ -246,6 +247,8 @@ class build:
 		
         self.rebuild = rebuild
 
+        self.use_wandb = use_wandb
+
     def dump(self):
         config = {
             "dataset": self.dataset,
@@ -294,6 +297,7 @@ class build:
             "use_nestrov": self.use_nestrov,
             "use_amsgrad": self.use_amsgrad,
             "loss": self.loss,
-            "rebuild": self.rebuild
+            "rebuild": self.rebuild,
+            "use_wandb": self.use_wandb
             }
         return config
