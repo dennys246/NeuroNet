@@ -6,8 +6,10 @@ config_template = {
     "architecture": "NeuroNet",
     "data_shape": None,
     "subject_pool": [],
-    "previously_run": [],
-    "excluded_subjects": [],
+    "trained_pool": [],
+    "validation_pool": [],
+    "test_pool": [],
+    "excluded_pool": [],
     "bids_directory": None,
     "bold_identifier": None,
 	"label_identifier":None,
@@ -17,6 +19,7 @@ config_template = {
     "tool": "fmriprep",
     "shuffle": False,
     "epochs": 10,
+    "current_epoch": 0,
     "batch_size": 36,
     "negative_slope": 0.1,
     "epsilon": 1e-6,
@@ -84,7 +87,7 @@ class build:
     def save_config(self, directory = None):
         directory = directory or f"{self.project_directory}/{self.model_directory}/model/"
         with open(f"{directory}config.json", 'w') as file:
-            json.dump(self.dump(), file)
+            json.dump(self.dump(), file, indent = 4)
              
     def load_config(self, directory = None):
         directory = directory or f"{self.project_directory}/{self.model_directory}/model/"
@@ -92,15 +95,17 @@ class build:
             config_json = json.load(config_file)
         return config_json
 
-    def configure(self, dataset, architecture, data_shape, subject_pool, previously_run, excluded_subjects, bids_directory, bold_identifier, label_identifier, project_directory, model_directory, checkpoint_path, model_history, tool, shuffle, epochs, batch_size, negative_slope, epsilon, learning_rate, bias, dropout, momentum, kernel_initializer, convolution_depth, init_filter_count, kernel_size, kernel_stride, zero_padding, padding, pool_size, pool_stride, multiscale_pooling, top_density, density_dropout, output_activation, outputs, outputs_category, output_descriptor, output_unit, history_types, optimizers, optimizer, use_nestrov, use_amsgrad, loss, rebuild, use_wandb):
+    def configure(self, dataset, architecture, data_shape, subject_pool, trained_pool, validation_pool, test_pool, excluded_pool, bids_directory, bold_identifier, label_identifier, project_directory, model_directory, checkpoint_path, model_history, tool, shuffle, epochs, current_epoch, batch_size, negative_slope, epsilon, learning_rate, bias, dropout, momentum, kernel_initializer, convolution_depth, init_filter_count, kernel_size, kernel_stride, zero_padding, padding, pool_size, pool_stride, multiscale_pooling, top_density, density_dropout, output_activation, outputs, outputs_category, output_descriptor, output_unit, history_types, optimizers, optimizer, use_nestrov, use_amsgrad, loss, rebuild, use_wandb):
 		#-------------------------------- Model Set-Up -------------------------------#
 		#These initial variables are used by NeuroNet and won't need to be set to anything
         self.dataset = dataset
         self.architecture = architecture
         self.data_shape = data_shape
         self.subject_pool = subject_pool
-        self.previously_run = previously_run
-        self.excluded_subjects = excluded_subjects
+        self.trained_pool = trained_pool
+        self.validation_pool = validation_pool
+        self.test_pool = test_pool
+        self.excluded_pool = excluded_pool
 		
         # Folder Structure - These variables are used to desribes where data is stored
 		# along with where to store the outputs of NeuroNet. The results directory is
@@ -130,6 +135,7 @@ class build:
 		# batch the samples into miniature training samples to help plot model performance.
 		
         self.epochs = epochs
+        self.current_epoch = current_epoch
         self.batch_size = batch_size
 
 		#---------------------------- Model Hyperparameters ---------------------------#
@@ -255,8 +261,10 @@ class build:
             "architecture": self.architecture,
             "data_shape": self.data_shape,
             "subject_pool": self.subject_pool,
-            "previously_run": self.previously_run,
-            "excluded_subjects": self.excluded_subjects,
+            "trained_pool": self.trained_pool,
+            "validation_pool": self.validation_pool,
+            "test_pool": self.test_pool,
+            "excluded_pool": self.excluded_pool,
             "bids_directory": self.bids_directory,
             "bold_identifier": self.bold_identifier,
             "label_identifier":self.label_identifier,
@@ -267,6 +275,7 @@ class build:
             "tool": self.tool,
             "shuffle": self.shuffle,
             "epochs": self.epochs,
+            "current_epoch": self.current_epoch,
             "batch_size": self.batch_size,
             "negative_slope": self.negative_slope,
             "epsilon": self.epsilon,
