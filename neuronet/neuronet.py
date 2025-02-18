@@ -1,7 +1,8 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
-import os, atexit, psutil, wandb
+import os, atexit, psutil, wandb, gc
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import numpy as np
 from glob import glob
 
 import pipeline, observer, config
@@ -20,6 +21,9 @@ class neuronet:
 		self.lens = observer.lens(self.config)
 
 		self.model = None # Initialize model variable
+
+		# Initialize dataset variables
+		self.x_train, self.y_train ,self.x_val, self.y_val, self.x_test, self.y_test = [np.array(None)]*6
 
 		atexit.register(self.save) # Set up force save model before exiting
 
@@ -44,7 +48,7 @@ class neuronet:
 			subject_id = subject.split('/')[-1]
 
 			# If subject was previously run, exclude from subject pool
-			if exclude_trained == True and subject_id in self.config.previously_run: 
+			if exclude_trained == True and subject_id in self.config.trained_pool: 
 				continue
 
 			# Grab all available sessions
@@ -85,17 +89,36 @@ class neuronet:
 		subject_pool = '\n'.join(self.subject_pool)
 		print(f"\n\nSubject pool available for use...\n{subject_pool}")
 		
-	def load(self, subjects = [], count = 0, session = '*', activation = 'linear', shuffle = False, jackknife = None, exclude_trained = True):
+	def load_data(self, subjects = [], count = 0, session = '*', fold_size = 10, shuffle = False, resolution = np.float16, activation = 'linear',  exclude_trained = True):
+		# Adjust count metric if only subject names were passed in 
 		if len(subjects) > 0: count = len(subjects)
 
-		if count >= 0:
-			results = self.wrangler.wrangle(self.subject_pool, subjects, count, session, activation, shuffle, jackknife, exclude_trained)
-			if results != False:
-				self.x_train, self.y_train, self.x_test, self.y_test = results
+		# Count how many test subjects have been passed in
+		test_count = sum([subject in self.config.test_pool for subject in subjects])
+		if test_count != 0 and exclude_trained == True:
+			subjects_requested = "\n".join(subjects)
+			trained_subjects = "\n".join(self.config.trained_pool)
+			validation_subjects = "\n".join(self.config.validation_pool)
+			test_subjects = "\n".join(self.config.test_pool)
+			print(f"Model test subjects have been passed in, but some subjects passed in aren't apart of the test pool. Please add these subjects into the test pool before loading them in to avoid model testing/training errors. If you did not intend to load test subjects, check you're subject loading scheme to make sure you aren't unintentionally loading in subjects twice.\n\nRequested subjects to load: {subjects_requested}\n\nTest subject pool:\n{test_subjects}\n\nTrained subjects:\n{trained_subjects}\n\nValidation subjects: {validation_subjects}")
+			return False
+
+		# Delete old data to make room for new data
+		if self.x_train.all() != None:
+			self.x_train, self.y_train, self.x_val, self.y_val = [None] * 4
+		if self.x_test.all() != None:
+			self.x_test, self.y_test = [None] * 2
+
+		garbage_count = gc.collect()
+
+		results = self.wrangler.wrangle(self.subject_pool, subjects, count, session, fold_size, shuffle, resolution, activation, exclude_trained)
+		if results != False:
+			if test_count:
+				self.x_test, self.y_test = results
 			else:
-				return False
+				self.x_train, self.y_train, self.x_val, self.y_val = results			
 		else:
-			self.wrangler.wrangle(self.subject_pool, subjects, count, session, activation, shuffle, jackknife, exclude_trained)
+			return False
 		return True
 
 	def plan(self):
@@ -137,27 +160,29 @@ class neuronet:
 			print(f"Layer {layer + 1} ({plan[0]}) | Filter count: {plan[1]} | Layer Shape: {plan[2]} | Deconvolution Output: {plan[3]}")
 
 	def build(self):
-		# Plan out model structure
+		# Plan and build out model structure based on config
+		print('\nConstructing NeuroNet model')
+		if self.config.data_shape == None: # Grab x, y, z dimension sizes from first subject 
+			self.config.data_shape = self.wrangler.load_shape(self.subject_pool[0], session = 0)
 		
-		if self.config.data_shape == None:
-			self.wrangler.wrangle(self.subject_pool, count = -1, session = 0, shape_extraction = True)
-		self.plan()
+		self.plan() # Call plan function to predict model dimensions
 
 		self.checkpoint_path = f"{self.config.project_directory}{self.config.model_directory}/model/ckpt.weights.h5"
+		self.config.current_epoch = 0
 
-		print('\nConstructing NeuroNet model')
 		self.model = tf.keras.models.Sequential() # Create first convolutional layer
 
 		# Add in initial input layer
+		print(f"build shape: {self.config.data_shape}")
 		self.model.add(tf.keras.Input((self.config.data_shape[0], self.config.data_shape[1], self.config.data_shape[2], 1), self.config.batch_size))
 		
 		for layer in range(self.config.convolution_depth): # Build the layer on convolutions based on config convolution depth indicated
-			self.model.add(tf.keras.layers.Conv3D(self.filter_counts[layer], self.config.kernel_size, strides = self.config.kernel_stride, padding = self.config.zero_padding, use_bias = True, kernel_initializer = self.config.kernel_initializer, bias_initializer = tf.keras.initializers.Constant(self.config.bias)))
+			self.model.add(tf.keras.layers.Conv3D(self.filter_counts[layer], self.config.kernel_size, strides = self.config.kernel_stride, padding = self.config.zero_padding, use_bias = False, kernel_initializer = self.config.kernel_initializer, bias_initializer = tf.keras.initializers.Constant(self.config.bias)))
 			self.model.add(tf.keras.layers.BatchNormalization())
 			self.model.add(tf.keras.layers.LeakyReLU(self.config.negative_slope))
-			self.model.add(SpatialAttention())
 			if layer + 1 < self.config.convolution_depth:
 				self.model.add(tf.keras.layers.MaxPooling3D(pool_size = self.config.pool_size, strides = self.config.pool_stride, padding = self.config.zero_padding, data_format = "channels_last"))
+			self.model.add(SpatialAttention())
 			if self.config.dropout:
 				self.model.add(tf.keras.layers.Dropout(self.config.dropout))
 
@@ -183,22 +208,21 @@ class neuronet:
 			)
 
 		if self.config.optimizer == 'Adam':
-			optimizer = tf.keras.optimizers.Adam(learning_rate = self.config.learning_rate, epsilon = self.config.epsilon, amsgrad = self.config.use_amsgrad)
+			self.optimizer = tf.keras.optimizers.Adam(learning_rate = self.config.learning_rate, epsilon = self.config.epsilon, amsgrad = self.config.use_amsgrad)
 		elif self.config.optimizer == 'SGD':
-			optimizer = tf.keras.optimizers.SGD(learning_rate = self.config.learning_rate, momentum = self.config.momentum, nesterov = self.config.use_nestrov)
+			self.optimizer = tf.keras.optimizers.SGD(learning_rate = self.config.learning_rate, momentum = self.config.momentum, nesterov = self.config.use_nestrov)
 		else:
-			optimizer = self.config.optimizer
-
+			self.optimizer = self.config.optimizer
 		if self.config.output_activation == 'linear': # Compile model for regression task
 			self.config.loss = 'mse'
 			self.config.history_types = ['loss']
-			self.model.compile(optimizer = optimizer, loss = self.config.loss, run_eagerly = True) # Compile model
+			self.model.compile(optimizer = self.optimizer, loss = self.config.loss, run_eagerly = True) # Compile model
 		else: # Else compile model for classification
 			self.config.loss = 'binary_crossentropy'
 			self.config.history_types = ['accuracy', 'loss']
-			self.model.compile(optimizer = optimizer, loss = self.config.loss, metrics = ['accuracy', 'loss'], run_eagerly=True) # Compile mode
+			self.model.compile(optimizer = self.optimizer, loss = self.config.loss, metrics = ['accuracy', 'loss'], run_eagerly=True) # Compile mode
 
-		print(f'\nNeuroNet model compiled using {self.config.optimizer}')
+		print(f'\nNeuroNet model compiled using {self.config.optimizer} - {self.model.optimizer}')
 
 		# Check if a model already exists and load	
 		if self.load_model():
@@ -213,23 +237,23 @@ class neuronet:
 			print(f"Model weights reinitialized")
 
 		# Set up Weights and Bias logging
+		if self.config.dataset != 'Study':
+			project_name = f"{self.config.dataset} {self.config.architecture}"
+
 		wandb.init(
 			# set the wandb project where this run will be logged
 			project = self.config.architecture,
 
 			# track hyperparameters and run metadata with wandb.config
 			config = {
+				"epoch":0,
 				"accuracy": self.config.history_types,
 				"loss": self.config.loss,
 				"val_accuracy": self.config.history_types,
 				"val_loss": self.config.loss,
 				"convolution_depth": self.config.convolution_depth,
 				"init_filter_count": self.config.init_filter_count,
-				"kernel_initializer": self.config.kernel_initializer,
-				"kernel_size": self.config.kernel_size,
-				"kernel_stride": self.config.kernel_stride,
-				"optimizer": self.config.optimizer,
-				"epoch": self.config.epochs,
+				"epochs": self.config.epochs,
 				"batch_size": self.config.batch_size,
 				"learning_rate": self.config.learning_rate,
 				"dropout": self.config.dropout,
@@ -237,23 +261,22 @@ class neuronet:
 				"bias": self.config.bias,
 				"momentum": self.config.momentum,
 				"negative_slope": self.config.negative_slope,
-				"top_density": self.config.top_density,
-				"density_dropout": self.config.density_dropout,
-				"dataset": self.config.dataset,
-				"tool": self.config.tool,
-				"multiscale_pooling": self.config.multiscale_pooling,
-				"use_nestrov": self.config.use_nestrov,
-    			"use_amsgrad": self.config.use_amsgrad
 			},
 
-			tags = ["NeuroNet", self.config.model_directory, "CNN"]
+			tags = ["NeuroNet", self.config.dataset ,self.config.model_directory, "CNN"]
 		)
+
+		# Define learning rate annealing 
+		cosine_annealing_callback = CosineAnnealingScheduler(self.config.learning_rate, self.config.learning_rate / 100, self.config.epochs)
+
+		wandb_callback = WandbLogger(self.config)
 
 		# Create a callback to the saved weights for saving model while training
 		self.callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath = self.checkpoint_path + '',
 											save_weights_only = True,
 											verbose = 1),
-						wandb.keras.WandbCallback()]
+								cosine_annealing_callback,
+								wandb_callback]
 
 	def calc_conv(self, shape):
 		return [(input_length - filter_length + (2*pad))//stride + 1 for input_length, filter_length, stride, pad in zip(shape, self.config.kernel_size, self.config.kernel_stride, self.config.padding)]
@@ -272,23 +295,45 @@ class neuronet:
 
 	def train(self):
 		# Display info about the training set
-		print(f"\nx-train: {self.x_train.shape}\ny-train: {self.y_train.shape}\n\nx-test: {self.x_test.shape}\ny-test: {self.y_test.shape}")
-		
+		print(f"\nx-train: {self.x_train.shape}\ny-train: {self.y_train.shape}\n\nx-val: {self.x_val.shape}\ny-val: {self.y_val.shape}")
+
 		# Fit the model to the training set
-		self.history = self.model.fit(self.x_train, self.y_train, epochs = self.config.epochs, batch_size = self.config.batch_size, validation_data = (self.x_test, self.y_test), callbacks = self.callbacks)
+		self.history = self.model.fit(self.x_train, self.y_train, epochs = self.config.epochs, batch_size = self.config.batch_size, validation_data = (self.x_val, self.y_val), callbacks = self.callbacks)
 		print(f"Train history: {self.history}")
-		
+		"""
+				# Log manually instead of using WandbCallback
+		for batch_epoch in range(len(self.history.history["loss"])):  
+			wandb.log({
+				"epoch": self.config.current_epoch + batch_epoch,
+				"train_loss": self.history.history["loss"][batch_epoch],
+				"val_loss": self.history.history["val_loss"][batch_epoch],
+				"train_acc": self.history.history.get("accuracy", ([None] * (batch_epoch + 1))),
+				"val_acc": self.history.history.get("val_accuracy", ([None] * (batch_epoch + 1))),
+				"learning_rate": self.history.history['lr'][batch_epoch],
+				"convolution_depth": self.config.convolution_depth,
+				"init_filter_count": self.config.init_filter_count,
+				"epochs": self.config.epochs,
+				"batch_size": self.config.batch_size,
+				"dropout": self.config.dropout,
+				"epsilon": self.config.epsilon,
+				"bias": self.config.bias,
+				"momentum": self.config.momentum,
+				"negative_slope": self.config.negative_slope,
+			})
+		"""
+		self.config.current_epoch += self.config.epochs
+
 		# Iterate through all history types and add too run history object
 		for history_type in self.config.history_types: # Save training history
 			self.config.model_history[history_type] += self.history.history[history_type]
 			self.config.model_history[f'val_{history_type}'] += self.history.history[f'val_{history_type}']
 
 		# Add subjects trained on to previously run batch and save
-		self.config.previously_run += self.wrangler.current_batch 
+		self.config.trained_pool += self.wrangler.training_batch 
 
 	def test(self):
 		# Test model by evaluating on test set
-		self.history = self.model.evaluate(self.x_test,  self.y_test, verbose=2)
+		self.history = self.model.evaluate(self.x_test, self.y_test, verbose=2)
 		print(f"Test History: {self.history}")
 		for history_type in self.config.history_types: # Save test history
 			self.config.model_history[f"val_{history_type}"] += self.history.history[f"val_{history_type}"]
@@ -374,22 +419,19 @@ class SpatialAttention(tf.keras.layers.Layer):
 	def __init__(self, kernel_size=7, **kwargs):
 		super(SpatialAttention, self).__init__(**kwargs)
 		self.kernel_size = kernel_size
-
 		self.concat = tf.keras.layers.Concatenate(axis=-1)
 		self.multiply = tf.keras.layers.Multiply()
-
 		self.conv = None
-		
+
 	def build(self, input_shape):
-		
-		
 		self.conv = tf.keras.layers.Conv3D(
-			filters=1, 
-			kernel_size=(1, self.kernel_size, self.kernel_size), 
-			strides=1, 
-			padding="same", 
+			filters=input_shape[-1],  # Preserve the same number of channels
+			kernel_size=(1, self.kernel_size, self.kernel_size),
+			strides=1,
+			padding="same",
 			activation="sigmoid"
 		)
+		super(SpatialAttention, self).build(input_shape)
 
 	def call(self, inputs):
 		# Calculate average-pooling and max-pooling
@@ -397,14 +439,21 @@ class SpatialAttention(tf.keras.layers.Layer):
 		max_pool = tf.reduce_max(inputs, axis=-1, keepdims=True)
 
 		# Concatenate pooled tensors
-		concat = self.concat([avg_pool, max_pool]) 
+		concat = self.concat([avg_pool, max_pool])
 
 		# Compute spatial attention map
 		attention = self.conv(concat)
 
-		# Scale by attention map
+		# Ensure the attention map has the same shape as the input
+		attention = tf.broadcast_to(attention, tf.shape(inputs))
+
+		# Scale by attention map (element-wise multiplication)
 		output = self.multiply([inputs, attention])
 		return output
+
+	def compute_output_shape(self, input_shape):
+		batch_size, depth, height, width, channels = input_shape
+		return (batch_size, depth, height, width, channels)
 
 	def get_config(self):
 		config = super(SpatialAttention, self).get_config()
@@ -445,3 +494,70 @@ class MultiScalePooling(tf.keras.layers.Layer):
 			input_shape[4] * 3   # Concatenated channels
 			)
 		return pooled_shape
+
+
+class CosineAnnealingScheduler(tf.keras.callbacks.Callback):
+	def __init__(self, max_lr, min_lr, T_max, reset_every=None):
+		super(CosineAnnealingScheduler, self).__init__()
+		self.max_lr = max_lr
+		self.min_lr = min_lr
+		self.T_max = T_max
+		self.reset_every = reset_every
+
+	def on_train_begin(self, logs=None):
+		# Ensure optimizer is properly set
+		if not hasattr(self.model.optimizer, "learning_rate"):
+			raise ValueError("Optimizer is not set correctly. Ensure model.compile() is called before model.fit().")
+
+	def on_epoch_begin(self, epoch, logs=None):
+		if self.reset_every and epoch % self.reset_every == 0 and epoch > 0:
+			print(f"\nEpoch {epoch+1}: Resetting Cosine Annealing")
+			epoch = 0  
+
+		# Compute new LR using cosine formula
+		lr = self.min_lr + (self.max_lr - self.min_lr) * 0.5 * (1 + np.cos(np.pi * (epoch % self.T_max) / self.T_max))
+
+		# Set the new learning rate
+		self.model.optimizer.assign(self.model.optimizer.learning_rate, lr)
+		print(f"\nEpoch {epoch+1}: Learning rate set to {lr:.6f}")
+
+		# Log the learning rate
+		logs = logs or {}
+		logs["lr"] = tf.keras.backend.get_value(self.model.optimizer.learning_rate)
+
+
+class WandbLogger(tf.keras.callbacks.Callback):
+	def __init__(self, config):  # Allow passing a model
+		super().__init__()
+		self.config = config  # Store model reference
+
+	def on_epoch_end(self, epoch, logs=None):
+		logs = logs or {}
+
+		# Get current learning rate
+		lr = self.model.optimizer.learning_rate.numpy()
+
+		# Extract loss and accuracy, providing None if missing
+		train_loss = logs.get("loss", None)
+		val_loss = logs.get("val_loss", None)
+		train_accuracy = logs.get("accuracy", logs.get("acc", None))  # "acc" for older versions
+		val_accuracy = logs.get("val_accuracy", logs.get("val_acc", None))
+
+		# Log all metrics to W&B
+		wandb.log({
+			"epoch": self.config.current_epoch + epoch,
+			"train_loss": train_loss,
+			"val_loss": val_loss,
+			"train_acc": train_accuracy,
+			"val_acc": val_accuracy,
+			"learning_rate": lr,
+			"convolution_depth": self.config.convolution_depth,
+			"init_filter_count": self.config.init_filter_count,
+			"epochs": self.config.epochs,
+			"batch_size": self.config.batch_size,
+			"dropout": self.config.dropout,
+			"epsilon": self.config.epsilon,
+			"bias": self.config.bias,
+			"momentum": self.config.momentum,
+			"negative_slope": self.config.negative_slope,
+		})
