@@ -3,30 +3,40 @@ import os, csv, shutil, time, random, psutil
 import numpy as np
 import nibabel as nib
 from glob import glob
-from scipy.signal import fftconvolve
-from scipy.stats import gamma
+from scipy.stats import zscore
 
 class wrangler:
 	def __init__(self, config):
 		self.config = config
 		return
 	
-	def wrangle(self, subject_pool, subjects = [], count = 1, session = '*', fold_size = 10, shuffle = False, resolution = np.float16, activation = 'linear',  exclude_trained = False):
+	def wrangle(self, subject_pool, subjects = [], count = 0, session = '*', fold_size = 10, shuffle = False, resolution = np.float16, activation = 'linear',  exclude_trained = False):
 		# Wrangle subjects into training and validation batches, using the fold size
 		# to determine how many subjects to put in the training set compared to validation
 		#
 		# NOTE: This function is not typically used for grabing testing subjects, consider
 		# Using the load subject function directly for testing
 
-		print(f"Wrangling {count} subjects (session  {session}) with fold of size {fold_size}.")
+		print(f"Wrangling {count} subjects data (session {session}) with fold of size {fold_size}.")
 
-		print(f"Training portion: {round(((fold_size - 2)/fold_size)*100, 1)}%\nValidation portion: {round((1/fold_size)*100, 1)}%\nTesting portion: {round((1/fold_size)*100, 1)}%")
+		print(f"Training portion: {round(((fold_size - 2)/fold_size)*100, 1)}%\nValidation portion: {round((1/fold_size)*100, 1)}%\nTesting portion: {round((1/fold_size)*100, 1)}%\n")
 	
+		# Handle misformatted subjects
+		if isinstance(subjects, list) == False:
+			if isinstance(subjects, str):
+				subjects = subjects.split(',')
+			else:
+				subjects = [str(subjects)]
+		
+		# Update count if not passed in
+		if count == 0: 
+			count = len(subjects)
+			if count == 0: # Check that enough subjects were passed in
+				print("Not enough subjects passed into wrangle, must pass in at least 1 subject or a count of 1 specified...")
+				return 
+
 		# Define the subject count found
 		subject_count = 0
-		if count == 0 and len(subjects) == 0: # Check that enough subjects were passed in
-			print("Not enough subjects passed into wrangle, must pass in at least 1 subject or a count of 1 specified...")
-			return 
 		
 		# Run through each subject and load data
 		self.training_batch = []
@@ -46,26 +56,37 @@ class wrangler:
 				subject = self.config.subject_pool.pop(random.randint(0, len(self.config.subject_pool) - 1))
 			else: # Grab the first subject in our passes subject list
 				subject = subjects.pop(0)
-			print(subject)
 
 			# Check if subject is in excluded list
 			if subject in self.config.excluded_pool: 
-				print(f'Excluding subject {subject} from run...')
+				print(f'Excluding subject {subject} from run...\n')
 				continue
 
 			# If subject previously run and we're not retraining\
 			if exclude_trained == True and sum([subject == trained_subject for trained_subject in self.config.trained_pool]) > 0: # check is subject previously run
-				print(f"Subject {subject} previously run, skipping subject...")
+				print(f"Subject {subject} previously run, skipping subject...\n")
 				continue
 
 			# Assess subject position in fold
 			viewed_count = len(self.config.trained_pool) + len(self.config.validation_pool) + len(self.config.test_pool) + len(self.training_batch)
 			position = viewed_count % fold_size
+			if subject in self.config.test_pool: # If requesting a test pool subject
+				position = -1 # Mark as test subject load
 
-			if position < (fold_size - 1): # If not a test subject at the end of a fold
+			if position < (fold_size - 1) or position == -1: # If not a test subject during training or a requested test subject
 				image, label = self.load_subject(subject, session, shuffle, resolution, activation)
+				
+				# Replace any NaN in BOLD images
+				nan_indices = np.isnan(image) # Find all NaN values
+				image[nan_indices] = 1e-6 # Replace with a small value/epsilon
+
+				# Remove images with irrelavent labels
+				nan_indices = np.isnan(label)
+				label = label[~nan_indices]
+				image = image[~nan_indices]
+
 				if len(label) == 0: # If no images available
-					print(f"Skipping {subject}, no labels...")
+					print(f"Skipping {subject}, no labels...\n")
 					continue # Skip subjects
 				if position != 0: # Append images
 					try: # appending the images to the image object
@@ -75,21 +96,26 @@ class wrangler:
 						images = image
 						labels = label
 
-			# Divide up data for training, testing and validating to achieve 80/10/10
-			
 			# Move through the fold
 			if position == 0: # Grab the validation image
 				self.validation_image = image
 				self.validation_labels = label
 				self.config.validation_pool.append(subject)
+				subject_count += 1
 				continue # Continue without incrementing subject count
 
-			elif position == (fold_size - 1): # Grab 
-				self.config.test_pool.append(subject)
+			elif position == (fold_size - 1): # If a test subject fold position
+				self.config.test_pool.append(subject) # Add to test pool
+				print(f"Subject {subject} added to test pool...\n")
+				subject_count += 1
+				continue
+
+			elif position == -1: # If requested test subject(s) "position"
+				return images, labels # Return all images and labels
 
 			else: # Grab training and validation indices indices
-				train_indices += [ind for ind in range(len(train_indices), len(train_indices) + len(image) - 1 )]
-
+				train_indices += [ind for ind in range(len(train_indices), len(train_indices) + len(label) - 1 )]
+				
 				val_start = int(round(self.validation_image.shape[0] * ((position-1)/8), 0))
 
 				val_end = int(round(self.validation_image.shape[0] * (position/8), 0))
@@ -105,29 +131,17 @@ class wrangler:
 		if images.shape[0] == 0:
 			return False
 		
-		print(f'Train indices count: {len(train_indices)}\nValidation indices count: {len(val_indices)}\nLength of labels: {len(labels)}')
-		x_train = images[train_indices,:,:,:]
-		y_train = labels[train_indices]
-		x_val = self.validation_image[val_indices,:,:,:]
-		y_val = self.validation_labels[val_indices]
-
-		return x_train, y_train, x_val, y_val
+		if position >= 0: # If a training batch, split and return using indices
+			print(f'Train indices count: {len(train_indices)}\nValidation indices count: {len(val_indices)}\nLength of labels: {len(labels)}\n')
+			return images[train_indices,:,:,:], labels[train_indices], self.validation_image[val_indices,:,:,:], self.validation_labels[val_indices]
+		
+		elif position == -1: # If test batch
+			return images, labels # Return all images and labels loaded
 
 
 	def load_subject(self, subject, session, shuffle = False, resolution = np.float16, activation = 'linear',  load_affine = False, load_header = False):
 		
-		print(f"Loading subject {subject}")
-
-        # Create a call for handling an empty empty exit <-- Update with **kwargs
-		def empty_exit(load_affine, load_header):
-			if load_affine == False and load_header == False:
-				return [], []
-			if load_header == False and load_affine == True:
-				return [], [], []
-			if load_header == True and load_affine == False:
-				return [], [], []
-			if load_header == True and load_affine == True:
-				return [], [], [], []
+		print(f"Loading subject {subject}...")
 	
 		image_file = self.load_image(subject, session, memory_map = True)
 	
@@ -135,48 +149,39 @@ class wrangler:
 		header = image_file.header 
 		self.config.header = header
 
-		affine = image_file.affine
-
         # Grab data
-		image = np.array(image_file.get_fdata(dtype=resolution))
+		images = np.array(image_file.get_fdata(dtype=resolution))
 
 		# Reshape image to have time dimension as first dimension and add channel dimension
-		image = image.reshape((image.shape[3], image.shape[0], image.shape[1], image.shape[2], 1))
-		self.config.data_shape = image.shape[1:-1]
-		print(f"Subject {subject} data shape: {image.shape}")
+		images = images.reshape((images.shape[3], images.shape[0], images.shape[1], images.shape[2], 1))
+		self.config.data_shape = images.shape[1:-1]
+		print(f"Subject {subject} data shape: {images.shape}")
 
-        # Normalize data
-		image = self.normalize(image)
+        # Normalize image data
+		images = self.normalize(images)
 
 		# Load labels
-		labels = self.load_labels(subject, session)
-		print(f'Subject {subject} label shape: {labels.shape}')
+		labels = self.load_labels(subject, session, resolution)
+		labels = np.array(labels)
+		print(f'Subject {subject} label shape: {labels.shape}\n')
         
         # If no labels ended up being loaded, exit
-		if labels.shape[0] == 0 or labels.shape[0] != image.shape[0]:
-			print(f"Labels are empty or labels length does not match image length...\n Image shape - {image.shape}\n Label shape - {labels.shape})")
-			return empty_exit(load_affine, load_header)
-		
-		if activation != 'linear': # If not a regression problem
-			labels = [int(label) for label in labels] # Convert labels to integers for classifing
-        
-        #  Shuffle images and labels if configured
-		if self.config.shuffle == True or shuffle == True:
-			image, labels = self.shuffle(image, labels)
+		if labels.shape[0] == 0 or labels.shape[0] != images.shape[0]:
+			print(f"WARNING: {subject} labels are empty or labels length does not match image length...\n Image shape - {image.shape}\n Label shape - {labels.shape})\n")
+			return [], []
 
-        # Return requested subject data <-- Update with **kwargs
-		if load_affine == False and load_header == False:
-			return image, labels
-		if load_header == False and load_affine == True:
-			return image, labels, affine
-		if load_header == True and load_affine == False:
-			return image, labels, header
-		if load_header == True and load_affine == True:
-			return image, labels, header, affine
+        #  Shuffle images and labels if configured
+		if subject not in self.config.test_pool:
+			if self.config.shuffle == True or shuffle == True:
+				images, labels = self.shuffle(images, labels)
+		return images, labels
 		
 	def load_image(self, subject, session, memory_map = False):
 		# look for all relavent image file
-		image_filenames = glob(f"{self.config.bids_directory}/derivatives/{self.config.tool}/{subject}/ses-{session}/func/{self.config.bold_identifier}")
+		if self.config.tool == "default":
+			image_filenames = glob(f"{self.config.bids_directory}/{subject}/ses-{session}/func/{self.config.bold_identifier}")
+		else:
+			image_filenames = glob(f"{self.config.bids_directory}/derivatives/{self.config.tool}/{subject}/ses-{session}/func/{self.config.bold_identifier}")
 		if image_filenames: #  if no image files found, return empty handed
 			if len(image_filenames) > 1:
 				print(f"WARNING: Multiple BOLD files found for subject {subject} session {session} using BOLD identifier {self.config.bold_identifier} provided, using first file found which could cause instability later in NeuroNet...")
@@ -186,9 +191,12 @@ class wrangler:
 			print(f'No images found for {subject} ses-{session} using BOLD identifier {self.config.bold_identifier}')
 			return False
 	
-	def load_labels(self, subject, session):
+	def load_labels(self, subject, session, resolution):
 		# Grab relavent label filenames
-		label_filenames = glob(f"{self.config.bids_directory}/derivatives/{self.config.tool}/{subject}/ses-{session}/func/{self.config.label_identifier}")
+		if self.config.tool == "default":
+			label_filenames = glob(f"{self.config.bids_directory}/{subject}/ses-{session}/func/{self.config.label_identifier}")
+		else:
+			label_filenames = glob(f"{self.config.bids_directory}/derivatives/{self.config.tool}/{subject}/ses-{session}/func/{self.config.label_identifier}")
 		if label_filenames: # If we grabbed more/less than one label file, exit
 			if len(label_filenames) > 1:
 				print(f"WARNING: Mutliple labels found for {subject} session {session}, grabbing first label file found however this may cause instability in NeuroNet...")
@@ -198,10 +206,6 @@ class wrangler:
 			print(f"No label files found for subject {subject} session {session}:\n {label_filenames}")
 			return False
 		
-		# Check if correct format
-		#if label_filename[-4:] not in ['.txt', '.csv', '.tsv']:
-		#	print(f"Error: file not in correct format, adjust file format to be .txt, .csv or .tsv. If file was not intended to be read, check that your label identifier {self.config.label_identifier} is unique to the file you want to load in.\n\nAttempted file loaded: {label_filename}")
-			
 		print(f"Loading label file {label_filename}")
 		# initialize empty labels and read in labels
 		labels = []
@@ -209,22 +213,46 @@ class wrangler:
             # Handle text file case
 			if label_filename[-4:] == '.txt': 
 				labels = label_file.readlines()
-				labels = [float(label) for label in ''.join(labels).split('\n') if label != '']
+				labels = [str(label).lower() for label in ''.join(labels).split('\n') if label != '']
             
             # Handle csv file case
 			if label_filename[-4:] == '.csv':
 				labels = []
 				csv_reader = csv.reader(label_filename)
 				for row in csv_reader:
-					labels.append(float(row))
+					labels.append(str(row).lower())
 
 			# Handle tsv file case
 			if label_filename[-4:] == '.tsv':
 				tsv_reader = csv.reader(label_filename, '\t')
 				for row in tsv_reader:
-					labels.append(float(row))
+					labels.append(str(row).lower())
+		
+		# Configure model for labels provided, i.e. classification or regression models
+		nan_texts = [None, 'nan', 'none', 'na']
+		if '.' in labels[0]:
+			labels = [float(label) if label not in nan_texts else np.nan for label in labels] # format labels as float points
+			
+			# Modify configuration for regression
+			self.config.output_activation = 'linear'
+			self.config.kernel_initializer = 'glorot_uniform'
+			self.config.loss = 'mse'
+			
+		else:
+			labels = [int(label) if label not in nan_texts else np.nan for label in labels] # Format labels as integers
+			# Modify configuration for classification
+			self.config.kernel_initializer = 'he_normal'
+			if self.config.output_activation == None:
+				if len(set(labels)) > 2:
+					self.config.loss = 'sparse_categorical_crossentropy'
+					self.config.output_activation = 'softmax'
+				else:
+					self.config.loss = 'binary_crossentropy'
+					self.config.output_activation = 'sigmoid'
+		
+		labels = np.array(labels, dtype=resolution) # Convert to a numpy array
 
-		return np.array(labels)
+		return labels
 
 	def load_shape(self, subject, session, image = None):
 		if image == None:
@@ -245,15 +273,26 @@ class wrangler:
 		
 		return images, labels
 	
-	def normalize(self, array):
-		# Find array min
-		array_min = np.min(array)
+	def normalize(self, array, norm_min = -1):
+		# Z score the BOLD data before normalizing
+		array = zscore(array, axis=0)
 
-		# Find array max
+		# Find array min and max
+		array_min = np.min(array)
 		array_max = np.max(array)
 
+		if self.config.norm_min == -1:
+			array = 2 * (array - array_min) / (array_max - array_min) - 1
+
+		elif self.config.norm_min == 0:
+			array = (array - array_min) / (array_max - array_min)
+
+		else:
+			print("ERROR: norm_min configuration can only be set to 0 (BOLD normalized ranging from [0, 1]) or -1 (normalized to [-1, 1])")
+			return None
+
 		# Pass back normalized array
-		return 2 * (array - array_min) / (array_max - array_min) - 1
+		return array
 
 
 	def mean_filter(self, image, filter_size):

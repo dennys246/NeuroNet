@@ -1,5 +1,5 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
-import os, atexit, psutil, wandb, gc
+import os, atexit, psutil, wandb, gc, time
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import numpy as np
@@ -30,8 +30,6 @@ class neuronet:
 		print("\n - NeuroNet Initialized -\n - Process PID - " + str(os.getpid()) + ' -\n')
 	
 	def orient(self, bids_directory, bold_identifier, label_identifier, exclude_trained = False):
-		self.wrangler.create_dir()
-
 		# Attach orientation variables to object for future use
 		self.config.bids_directory = bids_directory
 		self.config.bold_identifier = bold_identifier
@@ -42,10 +40,18 @@ class neuronet:
 		print(f"\nOrienting and generating NeuroNet lexicon for bids directory {self.config.bids_directory}...")
 		
 		# Generate a lexicon of all potential subjects
-		lexicon = [item for item in glob(f"{self.config.bids_directory}/derivatives/{self.config.tool}/sub-*") if os.path.isdir(item)]
+		if self.config.tool == 'default':
+			lexicon = [item for item in glob(f"{self.config.bids_directory}/sub-*/") if os.path.isdir(item)]
+		else:
+			lexicon = [item for item in glob(f"{self.config.bids_directory}/derivatives/{self.config.tool}/sub-*") if os.path.isdir(item)]
+
 		# Iterate through each subject found
 		for subject in lexicon:
-			subject_id = subject.split('/')[-1]
+			split = subject.split('/')
+			if split[-1]:
+				subject_id = split[-1]
+			else:
+				subject_id = split[-2]
 
 			# If subject was previously run, exclude from subject pool
 			if exclude_trained == True and subject_id in self.config.trained_pool: 
@@ -53,10 +59,17 @@ class neuronet:
 
 			# Grab all available sessions
 			sessions = glob(f"{subject}/ses-*/")
+			
 
 			# If none found alert about missing data
 			if len(sessions) == 0:
 				print(f"No sessions found for {subject_id}")
+			split = sessions[0].split('/')
+			if split[-1]:
+				self.example_session = split[-1]
+			else:
+				self.example_session = split[-2]
+			self.example_session = self.example_session.split('-')[-1]
 
 			# Iterate through each session
 			for session in sessions:
@@ -79,9 +92,11 @@ class neuronet:
 					label_filename = '\n'.join(label_filename)
 					print(f"Multiple label files found for {subject_id}...\n{label_filename}")
 					continue
+				
 
 				# Add subject to subject pool if it passed criteria
 				if subject_id not in self.subject_pool:
+					print(f"subject: {subject_id}")
 					self.subject_pool.append(subject_id) 
 
 		# Print found subject pool to user
@@ -89,13 +104,13 @@ class neuronet:
 		subject_pool = '\n'.join(self.subject_pool)
 		print(f"\n\nSubject pool available for use...\n{subject_pool}")
 		
-	def load_data(self, subjects = [], count = 0, session = '*', fold_size = 10, shuffle = False, resolution = np.float16, activation = 'linear',  exclude_trained = True):
+	def load_data(self, subjects = [], count = 0, session = '*', fold_size = 10, shuffle = False, resolution = np.float32, activation = 'linear',  exclude_trained = True):
 		# Adjust count metric if only subject names were passed in 
 		if len(subjects) > 0: count = len(subjects)
 
 		# Count how many test subjects have been passed in
 		test_count = sum([subject in self.config.test_pool for subject in subjects])
-		if test_count != 0 and exclude_trained == True:
+		if test_count != 0 and test_count != count:
 			subjects_requested = "\n".join(subjects)
 			trained_subjects = "\n".join(self.config.trained_pool)
 			validation_subjects = "\n".join(self.config.validation_pool)
@@ -103,20 +118,32 @@ class neuronet:
 			print(f"Model test subjects have been passed in, but some subjects passed in aren't apart of the test pool. Please add these subjects into the test pool before loading them in to avoid model testing/training errors. If you did not intend to load test subjects, check you're subject loading scheme to make sure you aren't unintentionally loading in subjects twice.\n\nRequested subjects to load: {subjects_requested}\n\nTest subject pool:\n{test_subjects}\n\nTrained subjects:\n{trained_subjects}\n\nValidation subjects: {validation_subjects}")
 			return False
 
+		def clean_mem():
+			garbage_count = gc.collect() # Take out the trash - prevents spike in memory consumption while loading new subjects
+			time.sleep(5) # Wait some time to give the system time to manage memory
+
 		# Delete old data to make room for new data
 		if self.x_train.all() != None:
 			self.x_train, self.y_train, self.x_val, self.y_val = [None] * 4
+			clean_mem()
+			
 		if self.x_test.all() != None:
 			self.x_test, self.y_test = [None] * 2
-
-		garbage_count = gc.collect()
+			clean_mem()
 
 		results = self.wrangler.wrangle(self.subject_pool, subjects, count, session, fold_size, shuffle, resolution, activation, exclude_trained)
 		if results != False:
 			if test_count:
 				self.x_test, self.y_test = results
+				print(f"X test max value: {self.x_test.max()} | min value: {self.x_test.min()}")	
+				print(f"y test max value: {self.y_test.max()} | min value: {self.y_test.min()}\n")
 			else:
-				self.x_train, self.y_train, self.x_val, self.y_val = results			
+				self.x_train, self.y_train, self.x_val, self.y_val = results
+				print(f"x-train shape: {self.x_train.shape}")
+				print(f"X train max value: {self.x_train.max()} | min value: {self.x_train.min()}")	
+				print(f"y train max value: {self.y_train.max()} | min value: {self.y_train.min()}\n")	
+				print(f"X val max value: {self.x_val.max()} | min value: {self.x_val.min()}")	
+				print(f"y val max value: {self.y_val.max()} | min value: {self.y_val.min()}")		
 		else:
 			return False
 		return True
@@ -160,10 +187,13 @@ class neuronet:
 			print(f"Layer {layer + 1} ({plan[0]}) | Filter count: {plan[1]} | Layer Shape: {plan[2]} | Deconvolution Output: {plan[3]}")
 
 	def build(self):
+		# Create data directory
+		self.wrangler.create_dir()
+
 		# Plan and build out model structure based on config
 		print('\nConstructing NeuroNet model')
 		if self.config.data_shape == None: # Grab x, y, z dimension sizes from first subject 
-			self.config.data_shape = self.wrangler.load_shape(self.subject_pool[0], session = 0)
+			self.config.data_shape = self.wrangler.load_shape(self.subject_pool[0], self.example_session)
 		
 		self.plan() # Call plan function to predict model dimensions
 
@@ -171,6 +201,8 @@ class neuronet:
 		self.config.current_epoch = 0
 
 		self.model = tf.keras.models.Sequential() # Create first convolutional layer
+
+		print(f"depth: {self.config.convolution_depth}\nkernel stride:{self.config.kernel_size}\nkernel size:{self.config.kernel_stride}")
 
 		# Add in initial input layer
 		print(f"build shape: {self.config.data_shape}")
@@ -196,7 +228,7 @@ class neuronet:
 			self.model.add(tf.keras.layers.LeakyReLU(self.config.negative_slope))
 			if dense_dropout == True:
 				self.model.add(tf.keras.layers.Dropout(self.config.dropout))
-		self.model.add(tf.keras.layers.Dense(1, activation=self.config.output_activation)) #Create output layer
+		self.model.add(tf.keras.layers.Dense(1, activation = self.config.output_activation)) #Create output layer
 
 		self.model.build()
 		self.model.summary()
@@ -208,25 +240,25 @@ class neuronet:
 			)
 
 		if self.config.optimizer == 'Adam':
-			self.optimizer = tf.keras.optimizers.Adam(learning_rate = self.config.learning_rate, epsilon = self.config.epsilon, amsgrad = self.config.use_amsgrad)
+			self.optimizer = tf.keras.optimizers.Adam(learning_rate = self.config.learning_rate, epsilon = self.config.epsilon, amsgrad = self.config.use_amsgrad, clipnorm = 1.0)
 		elif self.config.optimizer == 'SGD':
-			self.optimizer = tf.keras.optimizers.SGD(learning_rate = self.config.learning_rate, momentum = self.config.momentum, nesterov = self.config.use_nestrov)
+			self.optimizer = tf.keras.optimizers.SGD(learning_rate = self.config.learning_rate, momentum = self.config.momentum, nesterov = self.config.use_nestrov, clipnorm = 1.0)
 		else:
 			self.optimizer = self.config.optimizer
+			
 		if self.config.output_activation == 'linear': # Compile model for regression task
-			self.config.loss = 'mse'
 			self.config.history_types = ['loss']
 			self.model.compile(optimizer = self.optimizer, loss = self.config.loss, run_eagerly = True) # Compile model
 		else: # Else compile model for classification
-			self.config.loss = 'binary_crossentropy'
-			self.config.history_types = ['accuracy', 'loss']
-			self.model.compile(optimizer = self.optimizer, loss = self.config.loss, metrics = ['accuracy', 'loss'], run_eagerly=True) # Compile mode
+			self.config.history_types = ['accuracy']
+			self.model.compile(optimizer = self.optimizer, loss = self.config.loss, metrics = self.config.history_types, run_eagerly=True) # Compile mode
 
 		print(f'\nNeuroNet model compiled using {self.config.optimizer} - {self.model.optimizer}')
 
 		# Check if a model already exists and load	
 		if self.load_model():
 			print('NeuroNet weights and history loaded...')
+			
 		else: # Else save new weights to checkpoint path
 			if os.path.exists(self.checkpoint_path) == False or self.config.rebuild == True:
 				self.model.save_weights(self.checkpoint_path)
@@ -238,11 +270,11 @@ class neuronet:
 
 		# Set up Weights and Bias logging
 		if self.config.dataset != 'Study':
-			project_name = f"{self.config.dataset} {self.config.architecture}"
+			self.project_name = f"{self.config.dataset} {self.config.architecture}"
 
 		wandb.init(
 			# set the wandb project where this run will be logged
-			project = self.config.architecture,
+			project = self.project_name,
 
 			# track hyperparameters and run metadata with wandb.config
 			config = {
@@ -263,7 +295,7 @@ class neuronet:
 				"negative_slope": self.config.negative_slope,
 			},
 
-			tags = ["NeuroNet", self.config.dataset ,self.config.model_directory, "CNN"]
+			tags = [self.config.dataset, self.config.architecture, self.config.model_directory, "CNN"]
 		)
 
 		# Define learning rate annealing 
@@ -277,6 +309,9 @@ class neuronet:
 											verbose = 1),
 								cosine_annealing_callback,
 								wandb_callback]
+		
+		# Save the configuration for the build
+		self.config.save_config()
 
 	def calc_conv(self, shape):
 		return [(input_length - filter_length + (2*pad))//stride + 1 for input_length, filter_length, stride, pad in zip(shape, self.config.kernel_size, self.config.kernel_stride, self.config.padding)]
@@ -300,27 +335,6 @@ class neuronet:
 		# Fit the model to the training set
 		self.history = self.model.fit(self.x_train, self.y_train, epochs = self.config.epochs, batch_size = self.config.batch_size, validation_data = (self.x_val, self.y_val), callbacks = self.callbacks)
 		print(f"Train history: {self.history}")
-		"""
-				# Log manually instead of using WandbCallback
-		for batch_epoch in range(len(self.history.history["loss"])):  
-			wandb.log({
-				"epoch": self.config.current_epoch + batch_epoch,
-				"train_loss": self.history.history["loss"][batch_epoch],
-				"val_loss": self.history.history["val_loss"][batch_epoch],
-				"train_acc": self.history.history.get("accuracy", ([None] * (batch_epoch + 1))),
-				"val_acc": self.history.history.get("val_accuracy", ([None] * (batch_epoch + 1))),
-				"learning_rate": self.history.history['lr'][batch_epoch],
-				"convolution_depth": self.config.convolution_depth,
-				"init_filter_count": self.config.init_filter_count,
-				"epochs": self.config.epochs,
-				"batch_size": self.config.batch_size,
-				"dropout": self.config.dropout,
-				"epsilon": self.config.epsilon,
-				"bias": self.config.bias,
-				"momentum": self.config.momentum,
-				"negative_slope": self.config.negative_slope,
-			})
-		"""
 		self.config.current_epoch += self.config.epochs
 
 		# Iterate through all history types and add too run history object
@@ -330,19 +344,26 @@ class neuronet:
 
 		# Add subjects trained on to previously run batch and save
 		self.config.trained_pool += self.wrangler.training_batch 
+		self.wrangler.training_batch = [] # Reset the training batch
+		self.config.save_config()
+		self.model.save_weights(self.checkpoint_path) # Save model
 
 	def test(self):
 		# Test model by evaluating on test set
 		self.history = self.model.evaluate(self.x_test, self.y_test, verbose=2)
 		print(f"Test History: {self.history}")
+		history_types = self.config.history_types
+		if 'accuracy' in history_types:
+			history_types = self.config.history_types.append('loss')
 		for history_type in self.config.history_types: # Save test history
 			self.config.model_history[f"val_{history_type}"] += self.history.history[f"val_{history_type}"]
+		self.config.save_config()
 
 	def predict(self, x_range = None, subject_id = ""):
 		output = self.model.predict(self.x_test)
 		
 		if x_range == None:
-			x_range = range(50)
+			x_range = range(self.x_test.shape[0])
 
 		if subject_id != "":
 			fileend = f"_{subject_id}.png"
@@ -366,15 +387,6 @@ class neuronet:
 		plt.savefig(f"{self.config.project_directory}{self.config.model_directory}/plots/prediction_vs_real_scatterplot{fileend}")
 		plt.close()
 
-	def jack_knife(self, Range = None):
-			for self.jackknife in self.subject_pool:
-				print(f"Running Jack-Knife on Subject {str(self.jackknife)}")
-				self.wrangle(self.subject_pool, self.jackknife)
-				self.build()
-				self.train()
-				self.lens.plot_accuracy()
-				self.lens.ROC()
-
 	def save(self):
 		if self.model != None:
 			self.model.save_weights(self.checkpoint_path) # Save model
@@ -383,15 +395,12 @@ class neuronet:
 	
 	def load_model(self):
 		if os.path.exists(self.checkpoint_path):
-			if len(os.listdir('/'.join(self.checkpoint_path.split('/')[:-1]))) > 0:
-				#try:
+			checkpoint_dir = '/'.join(self.checkpoint_path.split('/')[:-1])
+			checkpoints = os.listdir(checkpoint_dir)
+			if len(checkpoints) > 0:
 				self.model.load_weights(self.checkpoint_path)
-				self.config.load_config()
 				print('NeuroNet loaded successfully')
 				return True
-				#except:
-				#	print('NeuroNet weights and history failed to load...')
-				#	return False
 			else:
 				print('NeuroNet not found...')
 				return False
@@ -534,23 +543,14 @@ class WandbLogger(tf.keras.callbacks.Callback):
 	def on_epoch_end(self, epoch, logs=None):
 		logs = logs or {}
 
-		# Get current learning rate
-		lr = self.model.optimizer.learning_rate.numpy()
-
-		# Extract loss and accuracy, providing None if missing
-		train_loss = logs.get("loss", None)
-		val_loss = logs.get("val_loss", None)
-		train_accuracy = logs.get("accuracy", logs.get("acc", None))  # "acc" for older versions
-		val_accuracy = logs.get("val_accuracy", logs.get("val_acc", None))
-
 		# Log all metrics to W&B
 		wandb.log({
 			"epoch": self.config.current_epoch + epoch,
-			"train_loss": train_loss,
-			"val_loss": val_loss,
-			"train_acc": train_accuracy,
-			"val_acc": val_accuracy,
-			"learning_rate": lr,
+			"train_loss": logs.get("loss", None),
+			"val_loss": logs.get("val_loss", None),
+			"train_acc": logs.get("accuracy", logs.get("acc", None)) ,
+			"val_acc": logs.get("val_accuracy", logs.get("val_acc", None)),
+			"learning_rate": self.model.optimizer.learning_rate.numpy(),
 			"convolution_depth": self.config.convolution_depth,
 			"init_filter_count": self.config.init_filter_count,
 			"epochs": self.config.epochs,

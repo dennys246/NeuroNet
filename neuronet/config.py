@@ -16,19 +16,20 @@ config_template = {
     "project_directory": "models/",
     "model_directory": "run_1",
     "checkpoint_path": None,
-    "tool": "fmriprep",
-    "shuffle": False,
-    "epochs": 10,
+    "tool": "default",
+    "shuffle": True,
+    "norm_min": -1,
+    "epochs": 100,
     "current_epoch": 0,
     "batch_size": 36,
     "negative_slope": 0.1,
     "epsilon": 1e-6,
     "learning_rate": 0.001,
     "bias": 0,
-    "dropout": 0.5,
+    "dropout": 0.1,
     "momentum": 0.9,
     "kernel_initializer": "glorot_uniform",
-    "convolution_depth": 2,
+    "convolution_depth": 4,
     "init_filter_count": 8,
     "kernel_size": [2, 2, 2],
     "kernel_stride": [1, 1, 1],
@@ -39,7 +40,7 @@ config_template = {
     "multiscale_pooling": False,
     "top_density": [2500, 1000, 400, 200, 100], # Change name, top density seems excessive?
     "density_dropout": [0.2, 0.1, False, False, False],
-    "output_activation": "linear",
+    "output_activation": None,
     "outputs": [-1.0, 1.0],
     "outputs_category": ["Negative", "Positive"],
     "output_descriptor": "Outcome",
@@ -58,14 +59,14 @@ config_template = {
 class build:
     def __init__(self, config_folder = None):
         config_json = None
-        if config_folder: # Try and load config if folder passed in
-            
-            config_files = glob(f"{config_folder}")
-            
+        if config_folder: # Try and load config if folder passed in     
+            config_files = glob(f"{config_folder}config.json")
             if len(config_files) == 0:
-                print(f'No config json files found in {config_folder}')
-                return None
-            elif len(config_files) > 1:
+                config_files = glob(f"{config_folder}/model/config.json")
+                if len(config_files) == 0:
+                    print(f'No config json files found in {config_folder}')
+                    return None
+            if len(config_files) > 1:
                 response = input("Multiple config files found, please enter the number corresponding to the file would you like to use?\n" + "\n".join([f"{ind + 1} - {file}" for ind, file in enumerate(config_files)] + "\nc - cancel\n\n"))
                 if response == 'c' or response.isdigit() == False:
                     return None
@@ -74,6 +75,7 @@ class build:
             else:
                 config_file = config_files[0]
             config_json = self.load_config(config_file)
+            config_json['rebuild'] = False # Set to false if able to load a pre-existing model
         
         config_json = config_json or config_template # Use passed in config or default config
 
@@ -84,18 +86,18 @@ class build:
     def __repr__(self):
         return '\n'.join([f"{key}: {value}" for key, value in self.dump.items()])
     
-    def save_config(self, directory = None):
-        directory = directory or f"{self.project_directory}/{self.model_directory}/model/"
-        with open(f"{directory}config.json", 'w') as file:
-            json.dump(self.dump(), file, indent = 4)
+    def save_config(self, config_path = None):
+        config_path = config_path or f"{self.project_directory}{self.model_directory}/model/config.json"
+        with open(config_path, 'w') as config_file:
+            json.dump(self.dump(), config_file, indent = 4)
              
-    def load_config(self, directory = None):
-        directory = directory or f"{self.project_directory}/{self.model_directory}/model/"
-        with open(f"{directory}config.json", "r") as config_file:
+    def load_config(self, config_path = None):
+        print(config_path)
+        with open(config_path, "r") as config_file:
             config_json = json.load(config_file)
         return config_json
 
-    def configure(self, dataset, architecture, data_shape, subject_pool, trained_pool, validation_pool, test_pool, excluded_pool, bids_directory, bold_identifier, label_identifier, project_directory, model_directory, checkpoint_path, model_history, tool, shuffle, epochs, current_epoch, batch_size, negative_slope, epsilon, learning_rate, bias, dropout, momentum, kernel_initializer, convolution_depth, init_filter_count, kernel_size, kernel_stride, zero_padding, padding, pool_size, pool_stride, multiscale_pooling, top_density, density_dropout, output_activation, outputs, outputs_category, output_descriptor, output_unit, history_types, optimizers, optimizer, use_nestrov, use_amsgrad, loss, rebuild, use_wandb):
+    def configure(self, dataset, architecture, data_shape, subject_pool, trained_pool, validation_pool, test_pool, excluded_pool, bids_directory, bold_identifier, label_identifier, project_directory, model_directory, checkpoint_path, model_history, tool, shuffle, norm_min, epochs, current_epoch, batch_size, negative_slope, epsilon, learning_rate, bias, dropout, momentum, kernel_initializer, convolution_depth, init_filter_count, kernel_size, kernel_stride, zero_padding, padding, pool_size, pool_stride, multiscale_pooling, top_density, density_dropout, output_activation, outputs, outputs_category, output_descriptor, output_unit, history_types, optimizers, optimizer, use_nestrov, use_amsgrad, loss, rebuild, use_wandb):
 		#-------------------------------- Model Set-Up -------------------------------#
 		#These initial variables are used by NeuroNet and won't need to be set to anything
         self.dataset = dataset
@@ -127,6 +129,7 @@ class build:
 		# to change this to false if you think your question has a time dimension to it
 		
         self.shuffle = shuffle
+        self.norm_min = norm_min
 
 		#------------------------------- Run parameters ------------------------------#
 		# Epoch and Batch Size - Both used to describe how the model will run, and
@@ -274,6 +277,7 @@ class build:
             "model_history": self.model_history,
             "tool": self.tool,
             "shuffle": self.shuffle,
+            "norm_min": self.norm_min,
             "epochs": self.epochs,
             "current_epoch": self.current_epoch,
             "batch_size": self.batch_size,
